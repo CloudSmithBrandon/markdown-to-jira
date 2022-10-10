@@ -13,6 +13,13 @@ const InputParser = require("../src/InputParser");
 
 const packageDetails = require(path.join(__dirname, "..", "package.json"));
 
+const teams = {
+  "Cloud Integrations": 3,
+  "Continuous Improvement": 1,
+  Platform: 2,
+  "Engineering Fundamentals": 4
+};
+
 let jira;
 
 (async () => {
@@ -20,12 +27,12 @@ let jira;
   program
     .version(packageDetails.version)
     .option(
-      "-c, --credentials [name]",
+      "-c, --credentials [value]",
       "Profile from ~/.atlassian/credentials to use",
       "default"
     )
-    .option("-s, --string [name]", "Accept a string on the command line")
-    .option("-f, --file [name]", "Read content from a file")
+    .option("-s, --string [value]", "Accept a string on the command line")
+    .option("-f, --file [value]", "Read content from a file")
     .option("-d, --dry", "Dry run - don't create any tickets")
     .option("-v, --verbose", "Show requests being made")
     .parse(process.argv);
@@ -63,28 +70,8 @@ let jira;
     username: credentials.username,
     password: credentials.token,
     apiVersion: "2",
-    strictSSL: true,
+    strictSSL: true
   });
-
-  // A bit of a hack, but the endpoint isn't available in the SDK
-  jira.fetchUsers = function(list) {
-    const names = Array.from(list)
-      .map((n) => {
-        return `&key=${n}`;
-      })
-      .join("");
-    return this.doRequest(
-      this.makeRequestHeader(
-        this.makeUri({
-          pathname: "/user/bulk/migration?maxResults=1000" + names,
-        }),
-        {
-          method: "GET",
-          followAllRedirects: true,
-        }
-      )
-    );
-  };
 
   let content = "";
 
@@ -110,45 +97,81 @@ let jira;
   let tickets = InputParser(content.toString());
 
   // Build a list of usernames encountered
-  const userNames = new Set();
-  for (t of tickets) {
-    userNames.add(t.assignee);
-    for (c of t.children) {
-      userNames.add(c.assignee);
-    }
+  const creds = credentials.username.split("@");
+  let domain = "";
+
+  // Parse out the domain, if supplied.
+  if (creds.length === 2) {
+    domain = creds[1];
   }
 
   // Map assignee name to IDs
   const userIds = {};
-  const users = await jira.fetchUsers(userNames);
-  for (const u of users) {
-    if (u.accountId == "unknown") {
-      continue;
+  const containsKey = (keys, name) => {
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] === name) {
+        return true;
+      }
     }
-    userIds[u.key] = u.accountId;
+
+    return false;
+  };
+
+  const getAssignee = source => {
+    let assignee = source;
+
+    if (domain && !assignee.indexOf(domain) > -1) {
+      assignee = `${assignee}@${domain}`;
+    }
+
+    return assignee;
+  };
+
+  for (t of tickets) {
+    let assignee = getAssignee(t.assignee);
+
+    if (!containsKey(Object.keys(userIds), assignee)) {
+      const user = await jira.searchUsers({ query: assignee });
+
+      userIds[assignee] = user.length > 0 ? user[0].accountId : undefined;
+    }
+
+    for (c of t.children) {
+      let assignee = getAssignee(c.assignee);
+
+      if (!containsKey(Object.keys(userIds), assignee)) {
+        const user = await jira.searchUsers({ query: assignee });
+
+        userIds[assignee] = user.length > 0 ? user[0].accountId : undefined;
+      }
+    }
   }
 
   // Validate that all usernames provided were valid
   // Parent tickets
-  tickets = tickets.map((t) => {
-    if (t.assignee) {
-      if (!userIds[t.assignee]) {
-        throw new Error(`Invalid assignee: ${t.assignee}`);
+  tickets = tickets.map(t => {
+    let assignee = getAssignee(t.assignee);
+
+    if (assignee) {
+      if (!userIds[assignee]) {
+        throw new Error(`Invalid assignee: ${assignee}`);
       }
       t.assignee = {
-        name: t.assignee,
-        id: userIds[t.assignee],
+        name: assignee,
+        id: userIds[assignee]
       };
     }
 
     // Child tickets
-    t.children = t.children.map((c) => {
-      if (!userIds[c.assignee]) {
-        throw new Error(`Invalid assignee: ${c.assignee}`);
+    t.children = t.children.map(c => {
+      assignee = getAssignee(c.assignee);
+
+      if (!userIds[assignee]) {
+        throw new Error(`Invalid assignee: ${cssignee}`);
       }
       c.assignee = {
-        name: c.assignee,
-        id: userIds[c.assignee],
+        name: assignee,
+        id: userIds[assignee]
       };
       return c;
     });
@@ -157,8 +180,19 @@ let jira;
   });
 
   const table = new Table({
-    head: ["Key", "Title", "Assignee", "Components", "Parent"],
-    colWidths: [15, 30, 20, 15, 15],
+    head: [
+      "Key",
+      "Title",
+      "Assignee",
+      "Components",
+      "Story Pts",
+      "Parent",
+      "Epic",
+      "Story",
+      "Team", 
+      "Classification"
+    ],
+    colWidths: [15, 30, 15, 15, 15, 10, 10, 10, 15, 15]
   });
 
   for (t of tickets) {
@@ -168,14 +202,25 @@ let jira;
       t.title,
       t.description,
       t.assignee.id,
-      t.components
+      t.components,
+      t.storyPoints,
+      undefined,
+      t.epic,
+      t.story,
+      t.team,
+      t.classification
     );
     table.push([
       parent.key,
       t.title,
       t.assignee.name || "",
       t.components.join("\n"),
+      t.storyPoints,
       "",
+      t.epic,
+      t.story,
+      t.team,
+      t.classification
     ]);
 
     // If there are any children, create tickets using the parent key generated above
@@ -187,14 +232,24 @@ let jira;
         c.description,
         c.assignee.id,
         c.components,
-        parent.key
+        c.storyPoints,
+        parent.key,
+        undefined,
+        c.story,
+        undefined,
+        c.classification
       );
       table.push([
         child.key,
         c.title,
         c.assignee.name,
         c.components.join("\n"),
+        c.storyPoints,
         parent.key,
+        "",
+        c.story,
+        "",
+        c.classification
       ]);
     }
   }
@@ -202,34 +257,59 @@ let jira;
   console.log(table.toString());
 })();
 
-function createIssue(
+async function createIssue(
   dryRun,
   project,
   title,
   description,
   assignee,
   components,
-  parentIssue
+  storyPoints,
+  parentIssue,
+  epic,
+  story,
+  team,
+  classification
 ) {
   let issueType = !parentIssue ? "Task" : "Sub-task";
   let request = {
     fields: {
-      components: components.map((v) => {
+      components: components.map(v => {
         return { name: v };
       }),
       assignee: {
-        id: assignee,
+        id: assignee
       },
       project: {
-        key: project,
+        key: project
       },
       summary: title,
       description: description,
       issuetype: {
-        name: issueType,
-      },
-    },
+        name: issueType
+      }
+    }
   };
+
+  if (epic) {
+    request["fields"]["customfield_10014"] = epic;
+  }
+
+  if (storyPoints && storyPoints > 0) {
+    request["fields"]["customfield_10025"] = storyPoints;
+  }
+
+  if (team) {
+    if (Number.isInteger(team)) {
+      request["fields"]["customfield_10001"] = `${team}`;
+    } else {
+      request["fields"]["customfield_10001"] = `${teams[team]}`;
+    }
+  }
+
+  if (classification) {
+    request["fields"]["customfield_10036"] = { value: classification };
+  }
 
   if (parentIssue) {
     request["fields"]["parent"] = { key: parentIssue };
@@ -246,5 +326,33 @@ function createIssue(
     }
     return Promise.resolve({ key: generatedKey });
   }
-  return jira.addNewIssue(request);
+
+  let result;
+  let linkResult;
+
+  try {
+    result = await jira.addNewIssue(request);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+
+  if (story) {
+    try {
+      linkResult = await jira.issueLink({
+        type: {
+          name: "Relates"
+        },
+        inwardIssue: {
+          key: result.key
+        },
+        outwardIssue: {
+          key: story
+        }
+      });
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  return Promise.resolve(result);
 }
