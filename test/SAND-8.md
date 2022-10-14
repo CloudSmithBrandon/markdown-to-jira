@@ -7,9 +7,9 @@ classification: Development
 
 # Amazing story
 
-- Make an awesome UI @brandon.kelly {UI} +8
+- Make an awesome UI @darlene.sparks {UI} +8
   This control is going to be the bees knees, completely awesome and will rock your socks.
-- Make a second awesome UI @brandon.kelly {UI} {API}
+- Make a second awesome UI @darlene.sparks {UI} {API}
   This one has some sub-tasks, because we need those.
   - Design control #1 {UI} +3
     Control #1 is great, and you're going to love it.
